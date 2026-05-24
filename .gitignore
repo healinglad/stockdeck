@@ -1,7 +1,8 @@
-# Local DB + WAL (personal watchlist state)
+# Local DB + WAL + dumps (personal watchlist state)
 *.db
 *.db-wal
 *.db-shm
+*.sql
 
 # Generated per-ticker prompts (company-specific, personal)
 prompts/
