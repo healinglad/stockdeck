@@ -1,0 +1,24 @@
+# Local DB + WAL (personal watchlist state)
+*.db
+*.db-wal
+*.db-shm
+
+# Generated per-ticker prompts (company-specific, personal)
+prompts/
+
+# Playwright MCP runtime debris
+page-*.yml
+console-*.log
+*.png
+
+# Secrets / local settings — never commit
+.claude/settings.local.json
+.env
+*.key
+*.pem
+
+# OS / editor
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
