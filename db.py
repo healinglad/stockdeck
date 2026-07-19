@@ -26,7 +26,7 @@ import os
 from datetime import datetime, timezone
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stockdeck.db")
-DEFAULT_QUARTER = "Q4 FY26"
+DEFAULT_QUARTER = "Q1 FY27"
 
 # Watchlist as provided by the user. Keys are the canonical ticker; the
 # screener slug defaults to the ticker and can be overridden via set-slug.

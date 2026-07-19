@@ -13,6 +13,7 @@ Automated workflow for producing a NotebookLM **slide deck + Hindi audio overvie
 - **No source wipe.** The old single-shared-notebook + wipe-between-tickers flow is retired (it caused cross-contamination when a wipe partially failed). There is nothing to delete.
 - **Quarter-scoping is mandatory.** Because the notebook holds several quarters of sources, every generation prompt MUST explicitly focus on the **target quarter** and use prior-quarter sources only for trend/correlation. (The Gem prompts already name the quarter; keep it.)
 - **Verify generation actually started.** PPT/audio generation sometimes fails silently (quota, transient errors). After clicking Generate we VERIFY and RETRY ONCE before recording success. Only mark the ticker done in the DB after both deck and audio are confirmed queued.
+- **Carry-forward memory (new 2026-07).** After a run's deck + audio are confirmed, we also persist a compact **"Analyst Summary"** text source grounded in *this* quarter's primary sources (transcript + Deep Research report), so each quarter's analytical narrative — not just raw numbers — carries into future quarters as clean, auditable trend/correlation context. We deliberately do **NOT** recycle the generated deck/audio artifacts back as sources: that is lossy, compounds drift quarter-over-quarter, and worsens exactly the source contamination that fixes #11/#13 blame for bad decks. The summary is a short first-order text note instead. This step is **best-effort and NEVER blocks `done`** (deck + audio are the only gating deliverables). See §5.5.
 - **Prompt generation stays dynamic.** The two Gems generate fresh, search-grounded prompts every run (do NOT replace with a static template). To keep Claude's context small, transfer each Gem response via **clipboard** (see Clipboard transfer). NOTE: `browser_evaluate`'s `filename` param saves the function's **return value**, NOT the page text — so it only archives the prompt body if you *return* the body (which leaks it into context). Don't use `filename` to archive prompts; the clipboard is the real transfer and the file fallback is not worth the context cost.
 
 ## Field-tested fixes (2026-05-24 — every one cost real time to learn; obey them)
@@ -133,9 +134,29 @@ Once the textarea verifies full (length ≈ the copied body), click **Generate**
 
 Click **Customize Audio Overview**. In one evaluate: open the `mat-select`, pick the option containing `हिन्दी`, **then re-read the select's displayed value and confirm it shows हिन्दी** (if not, retry the selection). **WAIT for the dialog's `<textarea>` to exist** (same Angular-render race as §4), then with the audio prompt on the clipboard, **click the textarea to focus it** and `browser_press_key` **`Control+V`**. **Verify `textarea.value.length >= 50`; retry the paste once if short, and if still short DO NOT click Generate** — record `failed` rather than queue a blank-prompt audio. Once verified full, click **Generate**. **VERIFY** a new Audio Overview artifact appears; retry once on failure. Audio language MUST be Hindi — if it cannot be set, record `failed` rather than generating English.
 
+### 5.5 Persist a carry-forward "Analyst Summary" source (best-effort, non-blocking)
+
+**Purpose.** Carry this quarter's *analytical narrative* into future quarters as a compact, auditable text source — grounded in **this** quarter's primary sources (transcript + Deep Research), NOT by recycling the generated deck/audio. Because the notebook is never wiped, the note persists and becomes trend/correlation context next quarter. (Every generation prompt is already quarter-scoped and treats older material as correlation-only, so a prior-quarter summary is context, never mistaken for the target quarter's data — see fix #11/#13 on why more sources ≠ better; this adds exactly ONE small text source per quarter.)
+
+**This step runs AFTER deck and audio are confirmed queued and is BEST-EFFORT: it must NEVER downgrade a good run.** If any part fails, log `summary: skipped` and still proceed to `mark <TICKER> done`. Do NOT mark the ticker `failed` because the summary step failed.
+
+**Idempotency (re-run guard).** The auto-generated source title does NOT reliably contain "Analyst Summary" (see step 3) — matching `/Analyst Summary/i` against `.source-title` elements is unreliable. Instead: open the most-recently-added note-derived source (its title is content-generated but still identifiable as the newest Studio note/source, "Xd ago"), and read its first line. If it already reads `<TICKER> <QUARTER> <FY> — Analyst Summary`, SKIP this whole step — never create a duplicate summary for the same quarter.
+
+Steps:
+1. **Generate the summary inside NotebookLM** (grounded on its own sources — zero Claude context cost; do NOT read the body). In the chat box, fill and send exactly:
+   ```
+   Begin your reply with exactly this line and nothing before it:
+   <TICKER> <QUARTER> <FY> — Analyst Summary
+   Then, using ONLY this notebook's sources for <QUARTER> <FY>, write a plain-text analyst summary in under 350 words covering: revenue, EBITDA/margin and PAT with QoQ and YoY deltas; management guidance/outlook; key segment or geography highlights; and 2-3 forward risks or watch-items. No markdown headers, no preamble after the first line.
+   ```
+   Poll until the chat response is complete (Stop button gone AND response length stable across two consecutive polls — same completion pattern as the Gem check in §1). You only act on buttons; never pull the body into context.
+2. **Save the response as a note.** On the completed chat message, click its save-to-note control (`button[aria-label*="Save message to a note" i]`, take the LAST match — never enumerate all buttons).
+3. **Convert the note to a source.** In Studio, NotebookLM auto-titles the note from its own content summary, NOT your literal first line (e.g. you'll see something like "HCLTech Q1 FY27 Performance Analysis and AI Growth Strategy" instead of "HCLTECH Q1 FY27 — Analyst Summary") — **this is expected, don't fight it.** To open the note: a plain `.click()` on the title `<span>` does nothing (Angular's real click target is a sibling `button.artifact-stretched-button` that overlays the row) — either `browser_click` with a `text=` selector (Playwright resolves the real button even when the synthetic `.click()` no-ops) or `document.querySelector('button[aria-labelledby="..."]')` using the id from the title span's `aria-describedby`/tooltip pairing. Once open, click **Convert to source**. **Do not chase renaming the resulting source to match the literal `Analyst Summary` string** — the Rename dialog's Save button silently no-ops on the native-setter+dispatchEvent('input') pattern that works everywhere else in this skill (untriaged; low priority since it's cosmetic). What actually matters for §5.5 step 4's idempotency check and for NotebookLM's own retrieval is the **note body**, which does correctly start with `<TICKER> <QUARTER> <FY> — Analyst Summary` — verify by opening the note and reading its first line, not by grepping source titles.
+4. **VERIFY.** Re-read the source count (`document.querySelectorAll('.source-title').length` before vs. after) — it should have risen by exactly 1. If it did → note `summary: saved`. If not, retry steps 2-3 once; if still not, note `summary: skipped` and continue. **Either way, proceed to §6 and mark `done` if deck+audio succeeded.**
+
 ### 6. Record outcome
 
-Only if BOTH deck and audio were confirmed queued:
+Only if BOTH deck and audio were confirmed queued (the carry-forward summary in §5.5 is NOT a gating condition):
 ```
 python db.py mark <TICKER> done
 ```
@@ -144,9 +165,9 @@ Otherwise `python db.py mark <TICKER> failed` (it will auto-retry on the next ro
 ### 7. Report
 One line per ticker:
 ```
-✓ <TICKER> (<STOCK_NAME>) — notebook: <created|reused>, sources +<N>, deck: queued✓, audio (हिन्दी): queued✓
+✓ <TICKER> (<STOCK_NAME>) — notebook: <created|reused>, sources +<N>, deck: queued✓, audio (हिन्दी): queued✓, summary: saved✓|skipped
 ```
-On failure, state which ticker, which step, and that it was marked `failed` for retry.
+On failure, state which ticker, which step, and that it was marked `failed` for retry. (A `summary: skipped` is NOT a failure — deck+audio still make the run a `done`.)
 
 ## Things to be careful about
 
@@ -156,6 +177,7 @@ On failure, state which ticker, which step, and that it was marked `failed` for 
 - **No wipe, ever** — one notebook per ticker; sources are additive. Cross-contamination is now impossible.
 - **Quarter-scope every prompt** — the notebook holds multiple quarters.
 - **Verify both generations** before marking done; PPT generation has been observed to fail silently.
+- **Carry-forward summary (§5.5) is best-effort** — never mark a ticker `failed` because it failed, and never let it delay/replace deck+audio. It is ONE small text source per quarter; do not recycle the generated deck/audio as sources (drift + contamination).
 - **Hindi is mandatory** and must be confirmed set before Generate.
 - **Pro source cap is 300/notebook** (~30 quarters). Prune only years out.
 - **Auth / 2FA / quota** mid-run: stop and report, don't retry-loop or attempt to authenticate.
