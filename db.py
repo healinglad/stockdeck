@@ -16,9 +16,21 @@ Usage (run with the project's Python):
   python db.py get-notebook <TICKER> # print this ticker's NotebookLM notebook id ('' if none yet)
   python db.py set-notebook <TICKER> <NOTEBOOK_ID>  # store the per-ticker notebook id
   python db.py mark <TICKER> <status>      # status: done | failed | skipped
+                                            # 'done' REFUSES unless the checklist's gating
+                                            # fields are all set for this ticker+quarter (see below)
   python db.py seed-done <T1,T2,...>       # bulk-mark done for current quarter
   python db.py status                # summary counts for current quarter
   python db.py report                # full per-ticker status table for current quarter
+  python db.py checklist-set <TICKER> <field> <value>  # record a per-run step outcome
+  python db.py checklist <TICKER>    # show this ticker's checklist for the current quarter
+
+Checklist fields (per ticker+quarter, written by SKILL.md as each step completes):
+  GATING (all must be truthy before 'mark done' succeeds):
+    style_checked, framework_checked, deck_verified_complete, audio_verified_complete
+  NON-GATING (best-effort / informational; 'mark done' never checks these):
+    style_idiom (text), sources_added (int), deck_generated, audio_generated,
+    summary_saved, dataaudit_run, coverage_audit_run
+  Boolean values accept 1/0, true/false, yes/no (case-insensitive).
 """
 import sqlite3
 import sys
@@ -27,6 +39,21 @@ from datetime import datetime, timezone
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stockdeck.db")
 DEFAULT_QUARTER = "Q1 FY27"
+
+# Checklist fields written by SKILL.md as each step of a run completes.
+# GATING fields are required (truthy) before `mark done` is allowed to succeed.
+# NON-GATING fields are best-effort / informational only — never checked by `mark`.
+CHECKLIST_BOOL_FIELDS = {
+    "style_checked", "framework_checked", "deck_generated", "deck_verified_complete",
+    "audio_generated", "audio_verified_complete", "summary_saved", "dataaudit_run",
+    "coverage_audit_run",
+}
+CHECKLIST_INT_FIELDS = {"sources_added"}
+CHECKLIST_TEXT_FIELDS = {"style_idiom"}
+CHECKLIST_FIELDS = CHECKLIST_BOOL_FIELDS | CHECKLIST_INT_FIELDS | CHECKLIST_TEXT_FIELDS
+CHECKLIST_GATING_FIELDS = [
+    "style_checked", "framework_checked", "deck_verified_complete", "audio_verified_complete",
+]
 
 # Watchlist as provided by the user. Keys are the canonical ticker; the
 # screener slug defaults to the ticker and can be overridden via set-slug.
@@ -65,6 +92,23 @@ def init():
             quarter TEXT NOT NULL,
             status TEXT NOT NULL,          -- done | failed | skipped
             ts TEXT NOT NULL,
+            PRIMARY KEY (ticker, quarter)
+        );
+        CREATE TABLE IF NOT EXISTS checklist (
+            ticker TEXT NOT NULL,
+            quarter TEXT NOT NULL,
+            style_checked INTEGER NOT NULL DEFAULT 0,
+            style_idiom TEXT NOT NULL DEFAULT '',
+            framework_checked INTEGER NOT NULL DEFAULT 0,
+            sources_added INTEGER NOT NULL DEFAULT 0,
+            deck_generated INTEGER NOT NULL DEFAULT 0,
+            deck_verified_complete INTEGER NOT NULL DEFAULT 0,
+            audio_generated INTEGER NOT NULL DEFAULT 0,
+            audio_verified_complete INTEGER NOT NULL DEFAULT 0,
+            summary_saved INTEGER NOT NULL DEFAULT 0,
+            dataaudit_run INTEGER NOT NULL DEFAULT 0,
+            coverage_audit_run INTEGER NOT NULL DEFAULT 0,
+            updated_ts TEXT,
             PRIMARY KEY (ticker, quarter)
         );
         """
@@ -171,10 +215,95 @@ def set_notebook(ticker, nb):
     print(f"{ticker} notebook -> {nb}")
 
 
+def _checklist_row(c, ticker, q):
+    cols = [
+        "style_checked", "style_idiom", "framework_checked", "sources_added",
+        "deck_generated", "deck_verified_complete", "audio_generated",
+        "audio_verified_complete", "summary_saved", "dataaudit_run",
+        "coverage_audit_run", "updated_ts",
+    ]
+    row = c.execute(
+        f"SELECT {', '.join(cols)} FROM checklist WHERE ticker=? AND quarter=?",
+        (ticker, q),
+    ).fetchone()
+    return dict(zip(cols, row)) if row else None
+
+
+def checklist_set(ticker, field, value):
+    if field not in CHECKLIST_FIELDS:
+        print(f"unknown checklist field: {field}")
+        print(f"valid fields: {', '.join(sorted(CHECKLIST_FIELDS))}")
+        sys.exit(1)
+    if field in CHECKLIST_BOOL_FIELDS:
+        v = value.strip().lower()
+        if v in ("1", "true", "yes"):
+            stored = 1
+        elif v in ("0", "false", "no"):
+            stored = 0
+        else:
+            print(f"bad boolean value for {field}: {value!r} (use 1/0/true/false/yes/no)")
+            sys.exit(1)
+    elif field in CHECKLIST_INT_FIELDS:
+        try:
+            stored = int(value)
+        except ValueError:
+            print(f"bad integer value for {field}: {value!r}")
+            sys.exit(1)
+    else:
+        stored = value
+    c = conn()
+    q = get_quarter(c)
+    c.execute(
+        "INSERT INTO checklist(ticker, quarter) VALUES (?,?) "
+        "ON CONFLICT(ticker, quarter) DO NOTHING",
+        (ticker, q),
+    )
+    c.execute(
+        f"UPDATE checklist SET {field}=?, updated_ts=? WHERE ticker=? AND quarter=?",
+        (stored, now(), ticker, q),
+    )
+    c.commit()
+    c.close()
+    print(f"{ticker} [{q}] checklist.{field} -> {stored}")
+
+
+def cmd_checklist(ticker):
+    c = conn()
+    q = get_quarter(c)
+    row = _checklist_row(c, ticker, q)
+    c.close()
+    print(f"== {ticker} [{q}] checklist ==")
+    if row is None:
+        print("(no checklist row yet — nothing recorded for this ticker+quarter)")
+        row = {f: (0 if f in CHECKLIST_BOOL_FIELDS else "") for f in CHECKLIST_FIELDS}
+    else:
+        for k, v in row.items():
+            print(f"{k:24} {v}")
+    missing = [g for g in CHECKLIST_GATING_FIELDS if not row.get(g)]
+    if missing:
+        print(f"-- NOT ready for `mark done`: missing {', '.join(missing)}")
+    else:
+        print("-- ready for `mark done`")
+
+
 def mark(ticker, status):
     assert status in ("done", "failed", "skipped"), f"bad status {status}"
     c = conn()
     q = get_quarter(c)
+    if status == "done":
+        row = _checklist_row(c, ticker, q)
+        missing = [g for g in CHECKLIST_GATING_FIELDS if not (row and row.get(g))]
+        if missing:
+            print(
+                f"REFUSED: {ticker} [{q}] cannot be marked done — "
+                f"checklist incomplete: {', '.join(missing)}"
+            )
+            print(
+                f"Run `python db.py checklist {ticker}` to inspect, finish the "
+                "missing step(s) in SKILL.md, then retry. Status left unchanged."
+            )
+            c.close()
+            sys.exit(1)
     c.execute(
         "INSERT INTO done(ticker, quarter, status, ts) VALUES (?,?,?,?) "
         "ON CONFLICT(ticker, quarter) DO UPDATE SET status=excluded.status, ts=excluded.ts",
@@ -255,6 +384,10 @@ def main():
         set_notebook(a[0], a[1])
     elif cmd == "mark":
         mark(a[0], a[1])
+    elif cmd == "checklist-set":
+        checklist_set(a[0], a[1], a[2])
+    elif cmd == "checklist":
+        cmd_checklist(a[0])
     elif cmd == "seed-done":
         seed_done(a[0])
     elif cmd == "status":

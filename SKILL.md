@@ -16,6 +16,8 @@ Automated workflow for producing a NotebookLM **slide deck + Hindi audio overvie
 - **Carry-forward memory (new 2026-07).** After a run's deck + audio are confirmed, we also persist a compact **"Analyst Summary"** text source grounded in *this* quarter's primary sources (transcript + Deep Research report), so each quarter's analytical narrative — not just raw numbers — carries into future quarters as clean, auditable trend/correlation context. We deliberately do **NOT** recycle the generated deck/audio artifacts back as sources: that is lossy, compounds drift quarter-over-quarter, and worsens exactly the source contamination that fixes #11/#13 blame for bad decks. The summary is a short first-order text note instead. This step is **best-effort and NEVER blocks `done`** (deck + audio are the only gating deliverables). See §5.5.
 - **Prompt generation stays dynamic.** The two Gems generate fresh, search-grounded prompts every run (do NOT replace with a static template). To keep Claude's context small, transfer each Gem response via **clipboard** (see Clipboard transfer). NOTE: `browser_evaluate`'s `filename` param saves the function's **return value**, NOT the page text — so it only archives the prompt body if you *return* the body (which leaks it into context). Don't use `filename` to archive prompts; the clipboard is the real transfer and the file fallback is not worth the context cost.
 - **Framework floor on top of the dynamic prompt (new 2026-07-18).** The Gem owns the DYNAMIC layer (recent events, quarter catalysts, current street view); a static per-sector checklist in `framework.md` owns the ESSENTIALS floor (e.g. NIM/GNPA for lenders, realization/spreads for chemicals). Every Gem body is evaluated IN-PAGE against that checklist before the clipboard copy (§1.5), and missing essentials are injected as a compact addendum at the TOP of the body. The framework never rewrites or trims the Gem prompt — additive only, and never fatal.
+- **Deterministic per-ticker style override (`styles.py`).** Some tickers have a hand-curated `IDIOM:` block in `<project-root>\stockwatch\styles\<TICKER>.md`, checked via `python styles.py get <TICKER>`. When present it OVERRIDES the Gem's own idiom choice in §0 — this is how a deck's look stays deterministic and reviewable across runs instead of the Gem re-inventing a look every quarter (and drifting toward generic Editorial/consumer templates on names like RAYMONDLSL that have a curated "Heritage archival" entry).
+- **A per-run checklist gates `mark done` (new 2026-08-03).** Each step below writes a small flag via `python db.py checklist-set <TICKER> <field> <value>` as it actually completes. `db.py mark <TICKER> done` reads that checklist and REFUSES (nonzero exit, status left unchanged) unless `style_checked`, `framework_checked`, `deck_verified_complete` and `audio_verified_complete` are all set — this exists because a real run (DLF, 2026-08-03) was marked `done` on "Generating Slide Deck…" status text, i.e. confirmation that generation *started*, when the deck generation had actually *failed* a few minutes later; a `done` ticker is never retried, so that failure would have silently persisted forever. `python db.py checklist <TICKER>` shows current state. The best-effort steps (§5.5/§5.7/§5.8) are tracked too but deliberately do NOT gate — see those sections.
 
 ## Field-tested fixes (2026-05-24 — every one cost real time to learn; obey them)
 
@@ -59,7 +61,12 @@ Run with the project Python:
 `python "<project-root>\stockwatch\db.py" <cmd>`
 - `get-notebook <TICKER>` → prints the ticker's notebook id (empty if none yet).
 - `set-notebook <TICKER> <ID>` → store the notebook id after creating one.
-- `mark <TICKER> done|failed` → record outcome for the current quarter.
+- `mark <TICKER> done|failed` → record outcome for the current quarter. **`done` fails closed** — see the checklist gate below and §6.
+- `checklist-set <TICKER> <field> <value>` → record that a step of the current run actually happened (see per-step calls throughout §1–§5.8). Booleans accept 1/0/true/false/yes/no.
+- `checklist <TICKER>` → print this ticker's current-quarter checklist and whether it's ready for `mark done`, for debugging a refused `mark done`.
+
+Also run with the project Python: `python "<project-root>\stockwatch\styles.py" get <TICKER>` — prints a hand-curated `IDIOM:` block for this ticker, or empty if none exists. See §0.
+
 Captured Gem prompts are written to `<project-root>\stockwatch\prompts\<TICKER>_<Q>_ppt.txt` and `_audio.txt` (so a retry can skip the Gem step).
 
 ## Fixed resources
@@ -149,6 +156,21 @@ This uses the *entire* search-grounded Gem prompt (no condensing) and costs ~0 p
 ## Per-ticker procedure
 
 Tickers run **sequentially**, but they no longer share state — each writes only to its own notebook.
+
+### 0. Check for a deterministic per-ticker style override
+
+**Before sending the PPT Gem prompt.** Run:
+```
+python "<project-root>\stockwatch\styles.py" get <TICKER>
+```
+If the output is **non-empty**, it is a hand-curated `IDIOM:` block for this exact ticker (see `styles.py`'s own docstring — this file exists specifically so a deck's look is deterministic and reviewable across quarters, instead of the Gem re-choosing an idiom every run). **Use it in place of the Gem's own idiom choice**: when you send the Pass-1 prompt below, replace the "DESIGN IDIOM (mandatory…)" and "EXECUTE THE IDIOM (mandatory)" paragraphs with an instruction that pastes the returned block verbatim and tells the Gem to commit to exactly that idiom, ground treatment and colour roles rather than picking its own. If the output is **empty**, proceed with the Gem choosing its own idiom as the prompt below already instructs.
+
+Either way — override applied or not — this step has run, so record it:
+```
+python db.py checklist-set <TICKER> style_checked 1
+python db.py checklist-set <TICKER> style_idiom "<idiom name, or empty string if none found>"
+```
+(`style_checked` records that the lookup happened, not that a file existed — a ticker with no style file is legitimately "checked and absent," not a skipped step.)
 
 ### 1. Capture both Gem prompts (dynamic, search-grounded)
 
@@ -241,6 +263,7 @@ Read only the `STOCK_NAME` line into context (identical from both Gems).
    After prepending, write the final text into the hidden textarea. Note `framework: +<key>+<key>` for the report.
 5. **Never fatal:** if the framework file is unreadable or the evaluate errors, log `framework: skipped` and prepend ONLY the data-fidelity clause to the condensed body (skip just the coverage addendum — the fidelity clause is not framework-dependent). A missing framework check must never fail a ticker or block generation.
 6. The archived `_ppt.txt`/`_audio.txt` should be written AFTER the prepend so the archive reflects exactly what was pasted (fidelity addendum + condensed dynamic prompt).
+7. Record that this step ran: `python db.py checklist-set <TICKER> framework_checked 1`. Do this regardless of the outcome noted in the report (`framework: ok` / `+<keys>` / `skipped` / `unmapped-<TICKER>`) — the checklist flag means the check was *performed*, not that every item was found; a genuine `framework: skipped` (point 5) still counts as checked because the fallback (fidelity-clause-only) ran in its place.
 
 ### 2. Find or create THIS ticker's notebook
 
@@ -265,6 +288,8 @@ There is **NO wipe step**. Do not delete any sources — **except** obvious junk
 2. **Dedup:** before importing, skip any discovered source whose title already exists in the notebook (avoid re-adding evergreen pages each quarter).
 
 **Confirm Deep Research actually engaged (not just that sources increased).** After Import, assert BOTH: (a) total source count rose to **≥20** (a flat **exactly 10** added means it silently fell back to Fast Research — re-run Discover in Deep Research mode), AND (b) a source titled `Deep Research Report: …` now exists in the notebook (`/Deep Research Report/i` against the source list). If either check fails, the run is shallow — redo the Deep Research discovery before generating, or the deck will be thin. Source count check: `document.querySelectorAll('button[id^="source-item-more-button-"]').length`.
+
+Record the number of new sources added this run (post-import count minus pre-import count): `python db.py checklist-set <TICKER> sources_added <N>`. Informational only — never gates `mark done`.
 
 ### 4. Slide Deck — generate AND verify
 
@@ -294,11 +319,21 @@ and the **longest** Length offered (currently `Default`; if a longer option such
 it). Verify both read as intended before Generate — "Presenter Slides" and `Short` both actively
 suppress content and must not be used for these decks.
 
-Once the textarea verifies full AND passes the content-survival check, click **Generate**. Then **VERIFY**: within ~20s a new Slide Deck artifact row should appear in the Studio list (or a "generating" state for it). If no new artifact appears and/or an error/quota toast shows → **retry once** (re-open Customize Slide Deck, re-wait, re-fill, Generate). If it still fails, record `failed` and continue to the next ticker — do NOT mark done.
+Once the textarea verifies full AND passes the content-survival check, click **Generate**. Then **VERIFY START**: within ~20s a new Slide Deck artifact row should appear in the Studio list (or a "generating" state for it). If no new artifact appears and/or an error/quota toast shows → **retry once** (re-open Customize Slide Deck, re-wait, re-fill, Generate). If it still fails, record `failed` and continue to the next ticker — do NOT mark done.
+
+**VERIFY COMPLETION — a started generation is NOT a finished one (2026-08-03 fix).** A real run (DLF, Q1 FY27, 2026-08-03) was marked `done` on the strength of "Generating Slide Deck…" status text — confirmation that generation had *started*, not that it *finished*. Checked a few minutes later, the deck had actually failed ("Slide Deck generation failed. Try a new one.") while the DB still said `done`; a `done` ticker is never retried, so this would have silently persisted forever. Do not repeat that: after the start-check above, **poll the Studio list in ≤270s windows for up to ~10 min total** until the artifact leaves its generating state — watch for EITHER a completed, openable artifact row (spinner/"Generating…" label gone) OR an explicit failure signal (a toast or row text such as "Slide Deck generation failed. Try a new one."). Do not stop after one status read; keep polling to a terminal state.
+- **Finished successfully** → `python db.py checklist-set <TICKER> deck_generated 1` then `python db.py checklist-set <TICKER> deck_verified_complete 1`, and continue to §5.
+- **Finished with a failure signal** → retry once (re-open Customize Slide Deck, re-wait, re-fill, Generate, re-poll to a terminal state). If it fails again → record `failed` and continue to the next ticker. Do **not** set `deck_verified_complete`.
+- **Still generating when the ~10 min budget is spent** → do not guess at success. Do not set `deck_verified_complete`; note the unresolved state in the report and either take one more poll window before moving on, or fall through to `failed` if the run must proceed. Only set `deck_verified_complete` on a terminal state you actually observed.
 
 ### 5. Audio Overview — Hindi, generate AND verify
 
-Click **Customize Audio Overview**. In one evaluate: open the `mat-select`, pick the option containing `हिन्दी`, **then re-read the select's displayed value and confirm it shows हिन्दी** (if not, retry the selection). **WAIT for the dialog's `<textarea>` to exist** (same Angular-render race as §4), then write the audio prompt in with the **native value setter + `input` event** exactly as §4 — never `Control+V` (fix #5). **Verify `textarea.value.length` equals what you set; retry the write once if short, and if still short DO NOT click Generate** — record `failed` rather than queue a blank-prompt audio. **Also apply the same content-survival check as §4** (last-line sanity check): confirm the surviving value contains `/transcript|Q&A|Q & A|guidance|risks/i`; if not, re-run the §1.4 audio condense once before generating. Once verified full and content-survived, click **Generate**. **VERIFY** a new Audio Overview artifact appears; retry once on failure. Audio language MUST be Hindi — if it cannot be set, record `failed` rather than generating English.
+Click **Customize Audio Overview**. In one evaluate: open the `mat-select`, pick the option containing `हिन्दी`, **then re-read the select's displayed value and confirm it shows हिन्दी** (if not, retry the selection). **WAIT for the dialog's `<textarea>` to exist** (same Angular-render race as §4), then write the audio prompt in with the **native value setter + `input` event** exactly as §4 — never `Control+V` (fix #5). **Verify `textarea.value.length` equals what you set; retry the write once if short, and if still short DO NOT click Generate** — record `failed` rather than queue a blank-prompt audio. **Also apply the same content-survival check as §4** (last-line sanity check): confirm the surviving value contains `/transcript|Q&A|Q & A|guidance|risks/i`; if not, re-run the §1.4 audio condense once before generating. Once verified full and content-survived, click **Generate**. **VERIFY START**: a new Audio Overview artifact appears; retry once on failure. Audio language MUST be Hindi — if it cannot be set, record `failed` rather than generating English.
+
+**VERIFY COMPLETION — same "started ≠ finished" fix as §4 (2026-08-03).** Poll the Studio list in ≤270s windows for up to ~10 min total until the audio artifact reaches a terminal state (openable artifact with a Devanagari/Hindi title, OR an explicit failure signal). A "generating" status is not sufficient to proceed.
+- **Finished successfully AND confirmed Hindi (Devanagari title, not English)** → `python db.py checklist-set <TICKER> audio_generated 1` then `python db.py checklist-set <TICKER> audio_verified_complete 1`.
+- **Finished but in English, or a failure signal** → retry once (re-select हिन्दी, re-fill, Generate, re-poll to terminal). If it fails again → record `failed` and continue. Do **not** set `audio_verified_complete`.
+- **Still generating past the ~10 min budget** → do not set `audio_verified_complete`; note it unresolved rather than assume success.
 
 ### 5.5 Persist a carry-forward "Analyst Summary" source (best-effort, non-blocking)
 
@@ -306,7 +341,7 @@ Click **Customize Audio Overview**. In one evaluate: open the `mat-select`, pick
 
 **This step runs AFTER deck and audio are confirmed queued and is BEST-EFFORT: it must NEVER downgrade a good run.** If any part fails, log `summary: skipped` and still proceed to `mark <TICKER> done`. Do NOT mark the ticker `failed` because the summary step failed.
 
-**Idempotency (re-run guard).** The auto-generated source title does NOT reliably contain "Analyst Summary" (see step 3) — matching `/Analyst Summary/i` against `.source-title` elements is unreliable. Instead: open the most-recently-added note-derived source (its title is content-generated but still identifiable as the newest Studio note/source, "Xd ago"), and read its first line. If it already reads `<TICKER> <QUARTER> <FY> — Analyst Summary`, SKIP this whole step — never create a duplicate summary for the same quarter.
+**Idempotency (re-run guard).** The auto-generated source title does NOT reliably contain "Analyst Summary" (see step 3) — matching `/Analyst Summary/i` against `.source-title` elements is unreliable. Instead: open the most-recently-added note-derived source (its title is content-generated but still identifiable as the newest Studio note/source, "Xd ago"), and read its first line. If it already reads `<TICKER> <QUARTER> <FY> — Analyst Summary`, SKIP this whole step — never create a duplicate summary for the same quarter. A summary already existing for this quarter still counts as saved: `python db.py checklist-set <TICKER> summary_saved 1`.
 
 Steps:
 1. **Generate the summary inside NotebookLM** (grounded on its own sources — zero Claude context cost; do NOT read the body). In the chat box, fill and send exactly:
@@ -318,7 +353,7 @@ Steps:
    Poll until the chat response is complete (Stop button gone AND response length stable across two consecutive polls — same completion pattern as the Gem check in §1). You only act on buttons; never pull the body into context.
 2. **Save the response as a note.** On the completed chat message, click its save-to-note control (`button[aria-label*="Save message to a note" i]`, take the LAST match — never enumerate all buttons).
 3. **Convert the note to a source.** In Studio, NotebookLM auto-titles the note from its own content summary, NOT your literal first line (e.g. you'll see something like "HCLTech Q1 FY27 Performance Analysis and AI Growth Strategy" instead of "HCLTECH Q1 FY27 — Analyst Summary") — **this is expected, don't fight it.** To open the note: a plain `.click()` on the title `<span>` does nothing (Angular's real click target is a sibling `button.artifact-stretched-button` that overlays the row) — either `browser_click` with a `text=` selector (Playwright resolves the real button even when the synthetic `.click()` no-ops) or `document.querySelector('button[aria-labelledby="..."]')` using the id from the title span's `aria-describedby`/tooltip pairing. Once open, click **Convert to source**. **Do not chase renaming the resulting source to match the literal `Analyst Summary` string** — the Rename dialog's Save button silently no-ops on the native-setter+dispatchEvent('input') pattern that works everywhere else in this skill (untriaged; low priority since it's cosmetic). What actually matters for §5.5 step 4's idempotency check and for NotebookLM's own retrieval is the **note body**, which does correctly start with `<TICKER> <QUARTER> <FY> — Analyst Summary` — verify by opening the note and reading its first line, not by grepping source titles.
-4. **VERIFY.** Re-read the source count (`document.querySelectorAll('.source-title').length` before vs. after) — it should have risen by exactly 1. If it did → note `summary: saved`. If not, retry steps 2-3 once; if still not, note `summary: skipped` and continue. **Either way, proceed to §6 and mark `done` if deck+audio succeeded.**
+4. **VERIFY.** Re-read the source count (`document.querySelectorAll('.source-title').length` before vs. after) — it should have risen by exactly 1. If it did → note `summary: saved` and `python db.py checklist-set <TICKER> summary_saved 1`. If not, retry steps 2-3 once; if still not, note `summary: skipped` and leave `summary_saved` at its default (do not set it) — continue regardless. **Either way, proceed to §6 and mark `done` if deck+audio succeeded.** `summary_saved` is informational only and is never part of the `mark done` gate.
 
 ### 5.7 Data-fidelity audit of the generated deck (best-effort, non-blocking)
 
@@ -339,6 +374,7 @@ Steps:
    - Ground truth came back all-NA (sources genuinely lack the numbers — e.g. transcript-only notebook) → `dataaudit: no-baseline` (nothing to check against; not a failure).
    - Any step errors or the artifact can't be read → `dataaudit: skipped`.
 5. A `regenerated` deck is NOT re-audited (one corrective pass only — avoid loops). A ticker is never marked `failed` by this section; the audit's job is to catch and correct, not to gate.
+6. Record `python db.py checklist-set <TICKER> dataaudit_run 1` for every outcome EXCEPT `dataaudit: skipped` (`ok`/`regenerated`/`no-baseline`/`pending` all mean the audit executed as designed). Leave it at its default on `skipped` — that is the honest signal that it didn't run. Informational only; never part of the `mark done` gate.
 
 ### 5.8 Coverage audit — did the deck actually carry everything? (best-effort, non-blocking)
 
@@ -399,19 +435,26 @@ Best-effort: it never un-marks a `done` and never gates §6. Report as `coverage
    the honest outcome; silently accepting a thin deck is not.
 5. This audit shares its regeneration budget with §5.7. If BOTH a fidelity fix and a coverage fix are
    needed, do **one** regeneration whose corrective line carries both instructions.
+6. Record `python db.py checklist-set <TICKER> coverage_audit_run 1` for every outcome EXCEPT
+   `coverage: skipped` (`ok`/`regenerated`/`unresolved`/`pending` all mean the audit executed). Leave it
+   at its default on `skipped`. Informational only; never part of the `mark done` gate.
 
 ### 6. Record outcome
 
-Only if BOTH deck and audio were confirmed queued (the carry-forward summary in §5.5 is NOT a gating condition):
+Only if BOTH deck and audio were confirmed queued **and their generation was verified complete, not merely started** (§4/§5's `deck_verified_complete`/`audio_verified_complete` checklist writes — the carry-forward summary in §5.5 and the §5.7/§5.8 audits are NOT gating conditions):
 ```
 python db.py mark <TICKER> done
 ```
-Otherwise `python db.py mark <TICKER> failed` (it will auto-retry on the next routine run).
+**`mark done` fails closed.** It reads this ticker+quarter's checklist and REFUSES — prints the missing fields, exits non-zero, leaves the ticker's status unchanged — unless `style_checked`, `framework_checked`, `deck_verified_complete` and `audio_verified_complete` are all set. `sources_added`, `summary_saved`, `dataaudit_run` and `coverage_audit_run` are never checked by the gate, matching the best-effort/non-blocking language in §5.5/§5.7/§5.8.
+
+**If `mark done` refuses, that is a signal to go back and finish the missing step — never a reason to force it another way.** Do not hand-edit the DB, do not call `mark done` again hoping it passes, and do not paper over a refusal by calling `mark failed` as a substitute without actually knowing why the step is incomplete. Run `python db.py checklist <TICKER>` to see exactly what's missing, then either complete that step for real or record `failed` if the underlying step genuinely can't be completed this run.
+
+Otherwise (deck or audio not verified complete) `python db.py mark <TICKER> failed` (it will auto-retry on the next routine run).
 
 ### 7. Report
 One line per ticker:
 ```
-✓ <TICKER> (<STOCK_NAME>) — notebook: <created|reused>, sources +<N>, condense: <full→condensed chars>, framework: ok|+<keys>|skipped, budget: ok(<total>), style: file|missing, slides: <N>, deck: queued✓, audio (हिन्दी): queued✓, summary: saved✓|skipped, dataaudit: ok|regenerated|pending|no-baseline|skipped, coverage: ok|regenerated(+<keys>)|unresolved(<keys>)|pending|skipped
+✓ <TICKER> (<STOCK_NAME>) — notebook: <created|reused>, sources +<N>, condense: <full→condensed chars>, framework: ok|+<keys>|skipped, budget: ok(<total>), style: file|missing, slides: <N>, deck: queued✓+verified✓, audio (हिन्दी): queued✓+verified✓, summary: saved✓|skipped, dataaudit: ok|regenerated|pending|no-baseline|skipped, coverage: ok|regenerated(+<keys>)|unresolved(<keys>)|pending|skipped, checklist: ready|blocked(<missing>)
 ```
 On failure, state which ticker, which step, and that it was marked `failed` for retry. (A `summary: skipped` is NOT a failure — deck+audio still make the run a `done`.)
 
@@ -422,7 +465,9 @@ On failure, state which ticker, which step, and that it was marked `failed` for 
 - **Remove the "Deep research" chip** on the Gems before submitting.
 - **No wipe, ever** — one notebook per ticker; sources are additive. Cross-contamination is now impossible.
 - **Quarter-scope every prompt** — the notebook holds multiple quarters.
-- **Verify both generations** before marking done; PPT generation has been observed to fail silently.
+- **Verify both generations *complete*, not just start** (§4/§5, 2026-08-03) — "Generating…" status text is not proof of success; PPT generation has been observed to fail silently after appearing to start (DLF, Q1 FY27), so poll to a terminal state before setting `deck_verified_complete`/`audio_verified_complete`.
+- **`mark done` fails closed on a per-run checklist (2026-08-03)** — it refuses unless `style_checked`, `framework_checked`, `deck_verified_complete` and `audio_verified_complete` are all recorded via `checklist-set` for this ticker+quarter. A refusal means go finish the missing step, not force the mark another way. `checklist <TICKER>` shows what's missing.
+- **Per-ticker style override (`styles.py`, §0)** — check it before letting the Gem invent an idiom. It exists so a deck's visual identity is deterministic and reviewable across quarters (e.g. RAYMONDLSL's curated "Heritage archival" entry) instead of drifting toward a generic look every run.
 - **Carry-forward summary (§5.5) is best-effort** — never mark a ticker `failed` because it failed, and never let it delay/replace deck+audio. It is ONE small text source per quarter; do not recycle the generated deck/audio as sources (drift + contamination).
 - **Hindi is mandatory** and must be confirmed set before Generate.
 - **Pro source cap is 300/notebook** (~30 quarters). Prune only years out.
